@@ -1,0 +1,517 @@
+```{r}
+rm(list = ls())
+library(SummarizedExperiment)
+library(readxl)
+library(impute)
+library(ggplot2)
+library(ggforce)
+library(tidyr)
+library(dplyr)
+library(tibble)
+library(rngtools)
+library(bumphunter)
+library(matrixStats)
+library(ggrepel)
+library(limma)
+library(writexl)
+library(methylGSA)
+library(org.Mm.eg.db)
+library(clusterProfiler)
+library(msigdbr)
+set.seed(77)
+
+result_folder <- "Methy_results"
+```
+
+### Functions 
+
+```{r}
+RunDMP <- function(SEobj) {
+  info <- as.data.frame(colData(SEobj))
+  info$group <- factor(info$group, levels = c("AL", "Fast"))
+  print(info)
+  designMatrix <- model.matrix(~ group, data = info)
+  print(designMatrix)
+
+  annot <- as.data.frame(rowData(SEobj))
+  chr <- annot$chr
+  pos <- as.numeric(annot$pos)
+  obj <- assay(SEobj, "M_value")
+
+  fit <- lmFit(obj, design = designMatrix)
+  fit.ebayes <- eBayes(fit,trend=TRUE, robust=F)
+  
+  DMPs <- topTable(fit.ebayes, coef = "groupFast", number = Inf, sort.by = "p")
+  DMPs$Probe_ID <- rownames(DMPs)
+  annot$Probe_ID <- rownames(annot)
+  
+  DMP_annotated <- merge(DMPs, annot, by = "Probe_ID")
+
+  return(DMP_annotated)
+}
+```
+
+
+
+```{r}
+get_pc_loadings <- function(se,
+                            assay_name = "beta",
+                            pc         = 2,
+                            top_prop   = 0.01
+) {
+  mat  <- assay(se, assay_name)  
+  rot  <- prcomp(t(mat), scale. = TRUE)$rotation[, pc]  
+  topN <- ceiling(top_prop * length(rot)) 
+  top_ids <- names(sort(abs(rot), decreasing = TRUE)[1:topN])
+  list(loadings = rot, high_loading_ids = top_ids)
+}
+```
+
+
+
+
+```{r}
+plot_pca <- function(se,
+                     assay_name = "beta",
+                     color_by   = "group",
+                     shape_by   = NULL,
+                     top_var    = Inf,
+                     palette    = NULL,
+                     shape_values = NULL,
+                     title = NULL) { 
+  mat  <- assay(se, assay_name)
+  meta <- as.data.frame(colData(se))
+
+  probe_var   <- rowVars(mat, na.rm = TRUE)
+  if (is.infinite(top_var)) top_var <- nrow(mat)
+  top_idx     <- order(probe_var, decreasing = TRUE)[1:top_var]
+  mat_t       <- t(mat[top_idx, , drop = FALSE])    
+
+  pca   <- prcomp(mat_t, scale. = TRUE)
+  varpc <- 100 * summary(pca)$importance["Proportion of Variance", 1:2]
+  df    <- cbind(as.data.frame(pca$x[, 1:2]), meta)
+
+  p <- ggplot(df, aes(x = PC1, y = PC2, colour = .data[[color_by]])) +
+       geom_point(size = 3) +
+       labs(title = title,
+            x = sprintf("PC1 (%.1f%%)", varpc[1]),
+            y = sprintf("PC2 (%.1f%%)", varpc[2]))
+  if (!is.null(shape_by)) {
+     if (!is.null(shape_values)) {
+          df[[shape_by]] <- factor(df[[shape_by]], levels = names(shape_values))
+          p <- p + aes(shape = .data[[shape_by]]) +
+                   scale_shape_manual(values = shape_values, drop = FALSE)
+      } else {
+          p <- p + aes(shape = .data[[shape_by]])
+      }
+  }
+  if (!is.null(palette)) 
+      p <- p + scale_color_manual(values = palette) 
+
+  # print(p)
+}
+```
+
+```{r}
+region_stats <- function(se,
+                         assay_name = c("beta", "M_value"),
+                         region_col = "region",
+                         group_col  = "group") {
+
+  assay_name <- match.arg(assay_name)
+  rd   <- rowData(se)
+  stopifnot(region_col %in% colnames(rd))
+
+  regions <- sort(unique(rd[[region_col]]))
+  mat     <- assay(se, assay_name) # probe × sample
+  meta    <- as.data.frame(colData(se))
+
+  sample_long <- lapply(regions, function(reg) {
+    keep  <- rd[[region_col]] == reg
+    means <- colMeans(mat[keep, , drop = FALSE], na.rm = TRUE)
+    data.frame(sample = colnames(mat),
+               group  = meta[[group_col]],
+               region = reg,
+               mean   = means,
+               n_probe = sum(keep))
+  }) %>% bind_rows()
+
+  region_summary <- sample_long %>%
+    group_by(region, n_probe) %>%
+    summarise(
+      mean_AL   = mean(mean[group == "AL"]),
+      mean_Fast = mean(mean[group == "Fast"]),
+      p_value   = t.test(mean ~ group)$p.value,
+      .groups   = "drop"
+    ) %>%
+    mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+    arrange(p_value)
+
+  list(sample_long = sample_long,
+       region_summary = region_summary)
+}
+```
+
+
+```{r}
+ENGO <- function(unise, setop){
+  universe <- unique(rowData(unise)$Gene_1st)
+  length(universe)
+  res <- enrichGO(rowData(setop)$Gene_1st, universe= universe, OrgDb= org.Mm.eg.db, keyType = "SYMBOL", ont = "ALL",  pAdjustMethod = "BH")
+return(res)
+}
+```
+
+
+### Preprocess & QC
+
+```{r}
+beta <- read_excel("Results.xlsx")
+beta <- as.data.frame(beta)
+rownames(beta) <- beta[[1]]
+beta <- beta[, -1]
+
+meth <- read_excel("Meth_sorted.xlsx")
+meth <- as.data.frame(meth)
+rownames(meth) <- meth[[1]]
+meth <- meth[, -1]
+
+unmeth <- read_excel("Ummeth_sorted.xlsx")
+unmeth <- as.data.frame(unmeth)
+rownames(unmeth) <- unmeth[[1]]
+unmeth <- unmeth[, -1]
+```
+
+```{r}
+annot <- read_excel("Annotation.xlsx")
+annot <- as.data.frame(annot)
+rownames(annot) <- annot[[1]]
+annot <- annot[, -1]
+
+annot$region <- dplyr::case_when(
+  annot$Relation_to_Island %in% c("N_Shore", "S_Shore")  ~ "Shore",
+  annot$Relation_to_Island %in% c("N_Shelf", "S_Shelf")  ~ "Shelf",
+  TRUE ~ annot$Relation_to_Island
+)
+
+annot$region2 <- dplyr::case_when(
+  annot$region %in% c("Island","Shore")     ~ "CGI_proximal",
+  annot$region %in% c("Shelf","OpenSea")    ~ "CGI_distal",
+  TRUE                                      ~ NA_character_
+)
+annot$region2 <- factor(annot$region2, levels = c("CGI_proximal","CGI_distal"))
+
+```
+
+
+```{r}
+detP <- read_excel("detP_sorted.xlsx")
+detP <- as.data.frame(detP)
+rownames(detP) <- detP[[1]]
+detP <- detP[, -1]
+```
+
+```{r}
+Sample <- read.csv("SampleSheet.csv")
+Sample$mouse_id <- sub("_NeuN\\(.+\\)$", "", Sample$Sample)
+Sample$mouse_id <- factor(Sample$mouse_id)
+```
+
+```{r}
+orig <- SummarizedExperiment(assays = list(beta = as.matrix(beta),detP = as.matrix(detP), unmeth = as.matrix(unmeth), meth = as.matrix(meth)),
+                           colData = DataFrame(Sample),
+                           rowData = annot)
+assay(orig, "M_value") <- log2((assay(orig, "meth") + 100) / (assay(orig, "unmeth") + 100))
+orig$group_source <- paste(orig$group, orig$source, sep = "_")
+
+probes_to_keep <- !(rowData(orig)$Gene_1st == "NA") & rowSums(assay(orig, "detP") < 0.01) == ncol(assay(orig, "detP")) & !grepl("[|]", rowData(orig)$Relation_to_Island) 
+
+cat("Orig:", nrow(orig), "\n")
+orig <- orig[probes_to_keep, ]
+cat("Keep:", nrow(orig), "\n")
+# rm(beta, meth, unmeth, annot, Sample)
+```
+
+### Summarized experiments
+
+```{r}
+all <- orig
+pos <- orig[, orig$source == "NeuN(+)"]
+neg <- orig[, orig$source == "NeuN(-)"]
+length(unique(rowData(all)$Gene_1st))
+length(unique(rowData(pos)$Gene_1st))
+length(unique(rowData(neg)$Gene_1st))
+
+se_list <- list(
+  all = all,
+  pos = pos,
+  neg = neg
+)
+```
+
+30208
+
+```{r fig.width=4.5, fig.height=4}
+## ---- Fig. 6A-B ----
+p_list <- lapply(names(se_list), function(name) {
+  se <- se_list[[name]]
+  plot_pca(
+    se,
+    assay_name = "beta",
+    title = paste0("PCA (beta) - ", name),
+    color_by = "group",
+    shape_by = "source",
+    shape_values = c("NeuN(+)" = 17, "NeuN(-)" = 16),
+    palette = myc
+  ) + myt(base_size = 8, lpo = "right")
+})
+names(p_list) <- names(se_list)
+
+p_list
+```
+
+### Table S10. Significance of PCs in separating experimental variables.xlsx
+
+```{r}
+pc_simple_test <- function(se, pc = 2, assay = "beta",
+                           term = "group", covar = "source",
+                           ref_level = NULL, scale. = TRUE) {
+  df <- as.data.frame(colData(se))
+  stopifnot(term %in% names(df))
+  X  <- t(assay(se, assay))
+  pc_scores <- prcomp(X, scale. = scale.)$x[, pc]
+
+  df[[term]] <- as.factor(df[[term]])
+  if (!is.null(ref_level) && ref_level %in% levels(df[[term]])) {
+    df[[term]] <- stats::relevel(df[[term]], ref = ref_level)
+  }
+
+  use_covar <- !is.null(covar) && covar %in% names(df) &&
+               is.factor(as.factor(df[[covar]])) &&
+               nlevels(as.factor(df[[covar]])) > 1
+
+  df$PC <- pc_scores
+  rhs <- if (use_covar) paste(term, covar, sep = " + ") else term
+  fit <- lm(stats::as.formula(paste("PC ~", rhs)), data = df)
+
+  a  <- drop1(fit, scope = ~ ., test = "F")
+  r  <- a[match(term, rownames(a)), , drop = FALSE]
+  Fv <- r[["F value"]]; df1 <- r[["Df"]]; df2 <- df.residual(fit)
+  p  <- r[["Pr(>F)"]]
+  eta2p <- (Fv * df1) / (Fv * df1 + df2)
+
+  data.frame(set = deparse(substitute(se)), PC = pc, assay = assay,
+             term = term, covar = if (use_covar) covar else NA,
+             F = Fv, df1 = df1, df2 = df2, p = p, eta2p = eta2p)
+}
+```
+```{r}
+res_allS <- pc_simple_test(orig, pc = 1, assay = "beta",
+                          term = "source", covar = "group",
+                          ref_level = "AL")
+
+res_all <- pc_simple_test(orig, pc = 2, assay = "beta",
+                          term = "group", covar = "source",
+                          ref_level = "AL")
+
+res_pos1 <- pc_simple_test(pos,  pc = 1, assay = "beta",
+                          term = "group", covar = "source",
+                          ref_level = "AL")
+
+res_pos <- pc_simple_test(pos,  pc = 2, assay = "beta",
+                          term = "group", covar = "source",
+                          ref_level = "AL")
+
+res_neg1 <- pc_simple_test(neg,  pc = 1, assay = "beta",
+                          term = "group", covar = "source",
+                          ref_level = "AL")
+
+res_neg <- pc_simple_test(neg,  pc = 2, assay = "beta",
+                          term = "group", covar = "source",
+                          ref_level = "AL")
+
+PC_res <- rbind(res_allS, res_all, res_pos1, res_pos, res_neg1, res_neg)
+write_xlsx(PC_res, path = file.path(result_folder, "Table S10. Significance of PCs in separating experimental variables.xlsx"))
+```
+
+### Differentially Methylated Positions (DMPs)
+
+```{r}
+## ---- results for Suppl. Fig. 11 ----
+dmp_list <- lapply(se_list, RunDMP)
+names(dmp_list) <- names(se_list)
+write_xlsx(dmp_list, path = file.path(result_folder, "DMP_results.xlsx"))
+```
+
+
+### Table S11. PC2_1pct_high_loading_probes.xlsx
+
+```{r}
+posHL <- get_pc_loadings(se_list[["pos"]], assay_name = "beta", pc = 2, top_prop = 0.01) 
+posHL  <- se_list[["pos"]][posHL$high_loading_ids, ]
+
+negHL <- get_pc_loadings(se_list[["neg"]], assay_name = "beta", pc = 2, top_prop = 0.01)
+negHL  <- se_list[["neg"]][negHL$high_loading_ids, ]
+
+to_rowdata_df <- function(se) {
+  df <- as.data.frame(rowData(se))
+  df <- cbind(probe = rownames(se), df)
+  rownames(df) <- NULL
+  df
+}
+
+pos_df <- to_rowdata_df(posHL)
+neg_df <- to_rowdata_df(negHL)
+
+write_xlsx(
+  list(
+    pos_PC2_top1pct_rowData = pos_df,
+    neg_PC2_top1pct_rowData = neg_df
+  ),
+  path = "Table S11. PC2_1pct_high_loading_probes.xlsx"
+)
+```
+
+
+
+```{r}
+## ---- results for Fig. 6C ----
+for (nm in names(se_list)) {
+  se <- se_list[[nm]]
+  pc2_res <- get_pc_loadings(se, assay_name = "beta", pc = 2, top_prop = 0.01)
+  se_top  <- se[pc2_res$high_loading_ids, ]
+  
+  n_probe <- nrow(se_top)
+  
+  genes <- rowData(se_top)$Gene_1st
+  n_gene <- length(unique(genes[!is.na(genes) & genes != ""]))
+  
+  cat(nm, ":", "n_probe =", n_probe, ", n_gene =", n_gene, "\n")
+}
+```
+ 
+pos : n_probe = 2121 , n_gene = 1949 
+neg : n_probe = 2121 , n_gene = 1919 
+
+
+
+```{r}
+## ---- results for Fig. 6D-E ----
+Avg_beta <- lapply(se_list, function(se) {
+  pc2_res <- get_pc_loadings(se, assay_name = "beta", pc = 2, top_prop = 0.01)
+  se_top  <- se[pc2_res$high_loading_ids, ]
+  region_stats(se_top, region = "region", assay_name = "beta")
+})
+
+
+Avg_B_sheets <- lapply(Avg_beta,function(x) x$sample_long)
+
+names(Avg_B_sheets) <- names(se_list)
+
+write_xlsx(Avg_B_sheets, path = file.path(result_folder, "top1_avg_beta.xlsx"))
+```
+
+### Table S12. ORA_of_high-loading_probes.xlsx
+
+```{r}
+res_go <- lapply(names(se_list), function(name) {
+  se <- se_list[[name]]
+
+  pc2_res <- get_pc_loadings(se, assay_name = "beta", pc = 2, top_prop = 0.01)
+  se_top  <- se[pc2_res$high_loading_ids, ]
+  ENGO(unise = se, setop = se_top)
+})
+names(res_go) <- names(se_list)
+```
+```{r}
+res_go_tables <- lapply(res_go, function(x) x@result)
+write_xlsx(res_go_tables, path = file.path(result_folder, "Table S12. ORA_of_high-loading_probes.xlsx"))
+```
+
+
+
+```{r fig.width=10, fig.height=10}
+## ---- Fig6. F-G ----
+library(aPEAR)
+set.seed(777)
+m <- aPEAR.methods
+m$similarity        <- "jaccard" 
+m$cluster           <- "markov" 
+m$clusterName       <- "hit" 
+m$clusterNameColumn <- "p.adjust" 
+m$minClusterSize    <- 3
+
+
+plots_pear <- lapply(names(res_go), function(x) {
+  enrich <- res_go[[x]]
+  clu <- findPathClusters(
+    enrichment = enrich@result,
+    methods    = m,
+    verbose    = FALSE
+  )
+
+  p <- plotPathClusters(
+    enrichment   = enrich@result,
+    sim          = clu$similarity,
+    clusters     = clu$clusters,
+    drawEllipses = TRUE,
+    colorBy      = "p.adjust",
+    nodeSize     = "Count",
+    repelLabels  = TRUE,
+    fontSize     = 4.5
+  ) +
+    scale_color_gradientn(
+      colours = c("#3C8DAD", "white", "#FF6767"),
+      limits  = range(enrich@result$p.adjust, na.rm = TRUE),
+      name    = "p.adjust"
+    ) +
+    ggtitle(paste0("GO enrichment network - ", x)) +
+    myt2(base_size = 12)
+
+  print(p)
+  p
+})
+
+names(plots_pear) <- names(res_go)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

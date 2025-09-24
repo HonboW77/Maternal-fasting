@@ -1,0 +1,224 @@
+```{r}
+rm(list = ls())
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(SeuratWrappers)
+library(writexl)
+library(readxl)
+library(ggplot2)
+library(ggforce)
+library(tidyr)
+library(dplyr) 
+library(tibble)
+library(pheatmap)
+library(RColorBrewer)
+library(ggrepel)
+library(plotly)
+library(writexl)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(scRNAtoolVis)
+set.seed(77)
+result <- "Results"
+```
+
+
+```{r}
+Norm <- function(obj) {
+  obj <- NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 10000)
+  obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 3000)
+  return(obj)
+}
+```
+
+```{r}
+CLN <- readRDS('0818AfterBanksyandRCTD')
+```
+
+```{r}
+mer <- merge(CLN[[1]], y = CLN[2:length(CLN)])
+```
+
+
+
+```{r}
+mer <- Norm(mer)
+mer <- JoinLayers(mer)
+```
+
+
+```{r}
+n_before <- ncol(mer)
+cat(n_before)
+cells_to_keep <- colnames(mer)[!is.na(mer$first_type)]
+mer <- subset(mer, cells = cells_to_keep)
+n_after <- ncol(mer)
+cat(n_before - n_after)
+```
+
+### Table S7. DEGs_mPFC_celltype_MAST
+
+```{r}
+Idents(mer) <- "first_type"
+mer <- subset(mer, subset = annotation =="mPFC")
+
+res_list <- list()
+for (reg in unique(mer$first_type)) {
+  cells_use <- WhichCells(mer, expression = first_type == reg)
+  cat("Region:", reg, " Cell:", length(cells_use), "\n")
+
+  seu_sub   <- subset(mer, cells = cells_use)
+
+  Idents(seu_sub) <- "group"
+  res_list[[reg]] <- FindMarkers(
+    seu_sub,
+    ident.1 = "Fast",
+    ident.2 = "AL",
+    assay  = "Spatial",
+    test.use = "MAST",
+    min.pct = 0.01,
+    logfc.threshold = 0.25,
+    latent.vars = c("nCount_Spatial"),
+    verbose = FALSE
+  )
+  res_list[[reg]]$gene <- rownames(res_list[[reg]])
+}
+```
+
+
+```{r}
+writexl::write_xlsx(res_list, path = "Table S7. DEGs_mPFC_celltype_MAST.xlsx")
+```
+
+### Table S8. ORA_mPFC_celltype.xlsx
+
+```{r}
+## ---- generate universe gene list for each cell type ----
+Idents(mer) <- "first_type"
+mer <- subset(mer, subset = annotation =="mPFC")
+
+res_list <- list()
+for (reg in unique(mer$first_type)) {
+  cells_use <- WhichCells(mer, expression = first_type == reg)
+  cat("Region:", reg, " Cell:", length(cells_use), "\n")
+
+  seu_sub   <- subset(mer, cells = cells_use)
+
+  Idents(seu_sub) <- "group"
+  res_list[[reg]] <- FindMarkers(
+    seu_sub,
+    ident.1 = "Fast",
+    ident.2 = "AL",
+    assay  = "Spatial",
+    min.pct = 0.01,
+    logfc.threshold = 0,
+    verbose = FALSE
+  )
+  res_list[[reg]] <- data.frame(gene = rownames(res_list[[reg]]))
+}
+
+writexl::write_xlsx(res_list, path = "Universe_celltype_mPFC.xlsx")
+```
+
+
+```{r}
+file <- "Table S7. DEGs_mPFC_celltype_MAST.xlsx"
+sheets <- excel_sheets(file)
+resgo <- lapply(sheets, function(x) read_excel(file, sheet = x))
+names(resgo) <- sheets
+```
+
+```{r}
+sel <- c("L2-3_IT","L5-6_IT","CT","PT","GABA_MGE","Ast")
+sel <- intersect(sel, names(resgo))
+
+uni_sheets <- excel_sheets("Universe_celltype_mPFC.xlsx")
+uni <- lapply(uni_sheets, function(x) read_excel("Universe_celltype_mPFC.xlsx", sheet = x))
+names(uni) <- uni_sheets
+
+do_enrich <- function(df, x) {
+  universe <- uni[[x]]$gene
+  up <- df %>%
+    filter(!is.na(p_val_adj), p_val_adj < 0.05, avg_log2FC > 0.25) %>%
+    pull(gene) %>% unique()
+  up <- up[!is.na(up) & nzchar(up)]
+  enrichGO(
+    gene          = up,
+    universe      = universe,
+    OrgDb         = org.Mm.eg.db,
+    keyType       = "SYMBOL",
+    ont           = "ALL",
+    pAdjustMethod = "BH",
+    readable      = TRUE
+  )
+}
+
+ego_list <- Map(do_enrich, resgo[sel], names(resgo[sel]))
+
+ego_tbl <- lapply(ego_list, function(x) x@result)
+
+write_xlsx(ego_tbl, "Table S8. ORA_mPFC_celltype.xlsx")
+```
+
+```{r}
+library(dplyr)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+
+sel <- c("L2-3_IT","L5-6_IT","CT","PT","GABA_MGE","Ast")
+sel <- intersect(sel, names(resgo))
+
+uni_sheets <- excel_sheets("Universe_celltype_mPFC.xlsx")
+uni <- lapply(uni_sheets, function(x) read_excel("Universe_celltype_mPFC.xlsx", sheet = x))
+names(uni) <- uni_sheets
+
+do_enrich <- function(df, x) {
+  universe <- uni[[x]]$gene
+  up <- df %>%
+    filter(!is.na(p_val_adj), p_val_adj < 0.05, avg_log2FC > 0.25) %>%
+    pull(gene) %>% unique()
+  up <- up[!is.na(up) & nzchar(up)]
+  enrichGO(
+    gene          = up,
+    universe      = universe,
+    OrgDb         = org.Mm.eg.db,
+    keyType       = "SYMBOL",
+    ont           = "ALL",
+    pAdjustMethod = "BH",
+    readable      = TRUE
+  )
+}
+
+ego_list <- Map(do_enrich, resgo[sel], names(resgo[sel]))
+
+ego_tbl <- lapply(ego_list, function(x) x@result)
+
+write_xlsx(ego_tbl, "mPFC_celltype_mast_ora.xlsx")
+```
+
+```{r}
+# do_enrich <- function(df, x) {
+#   universe <- uni[[x]]$gene
+#   up <- df %>%
+#     filter(!is.na(p_val_adj), p_val_adj < 0.05, avg_log2FC < -0.25) %>%
+#     pull(gene) %>% unique()
+#   up <- up[!is.na(up) & nzchar(up)]
+#   enrichGO(
+#     gene          = up,
+#     universe      = universe,
+#     OrgDb         = org.Mm.eg.db,
+#     keyType       = "SYMBOL",
+#     ont           = "ALL",
+#     pAdjustMethod = "BH",
+#     readable      = TRUE
+#   )
+# }
+# 
+# ego_list <- Map(do_enrich, resgo[sel], names(resgo[sel]))
+# 
+# ego_tbl <- lapply(ego_list, function(x) x@result)
+# 
+# write_xlsx(ego_tbl, "mPFC_celltype_mast_ora_downreg.xlsx")
+```
+

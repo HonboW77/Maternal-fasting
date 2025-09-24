@@ -1,0 +1,212 @@
+```{r}
+rm(list = ls())
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(spacexr)
+library(SeuratWrappers)
+set.seed(77)
+```
+
+### Fix metadata
+
+```{r}
+fix_meta <- function(obj){
+  md <- obj@meta.data
+  raw_cols <- vapply(md, is.raw, TRUE)
+  if (any(raw_cols)){
+    md[raw_cols] <- lapply(md[raw_cols], function(x)
+      as.logical(as.integer(x)))
+    obj@meta.data <- md
+  }
+  obj
+}
+```
+
+
+```{r}
+AL1 <- readRDS('AL1_mpfc.rds')
+AL2 <- readRDS('AL2_mpfc.rds')
+Fast1 <- readRDS('Fast1_mpfc.rds')
+Fast2 <- readRDS('Fast2_mpfc.rds')
+
+AL1 <- fix_meta(AL1)
+AL2 <- fix_meta(AL2)
+Fast1 <- fix_meta(Fast1)
+Fast2 <- fix_meta(Fast2)
+
+AL1$group <- "AL"
+AL2$group <- "AL"
+Fast1$group <- "Fast"
+Fast2$group <- "Fast"
+
+AL1$Sample <- "AL1"
+AL2$Sample <- "AL2"
+Fast1$Sample <- "Fast1"
+Fast2$Sample <- "Fast2"
+ALL <- list(A1 = AL1, A2 = AL2, F1 = Fast1, F2 = Fast2)
+
+for (id in names(ALL)) {
+  ALL[[id]] <- RenameCells(object = ALL[[id]], add.cell.id = id)
+}
+print(head(colnames(ALL$A1)))
+
+rm("AL1", "AL2","Fast1", "Fast2")
+```
+
+### detect and remove artificial spots outside brain sections
+
+```{r}
+suppressPackageStartupMessages({
+  library(dbscan)
+  library(FNN)
+})
+
+TagSpatialIslands_DBSCAN_auto <- function(
+  obj,
+  minPts = 10,
+  q_start = 0.75,
+  mult_start = 1.2, 
+  target_outlier = 0.002,
+  max_outlier = 0.10, 
+  max_iter = 12,   
+  flag_name = "in_tissue_spatial",
+  island_col = "spatial_island",
+  verbose = TRUE
+){
+  if (!flag_name %in% colnames(obj@meta.data))  obj@meta.data[[flag_name]]  <- 0L
+  if (!island_col %in% colnames(obj@meta.data)) obj@meta.data[[island_col]] <- FALSE
+
+  ims <- Images(obj)
+  if (length(ims) == 0L && verbose) message(">> Skip")
+  for (im in ims) {
+    coords <- obj@images[[im]]@coordinates
+    if (nrow(coords) == 0) next
+    xy <- as.matrix(coords[, c("imagecol", "imagerow")])
+
+    nn1 <- FNN::get.knn(xy, k = 1)$nn.dist[, 1]
+    eps <- as.numeric(quantile(nn1, probs = q_start, na.rm = TRUE)) * mult_start
+
+    it <- 0L
+    best <- NULL
+    repeat {
+      it <- it + 1L
+      fit <- dbscan::dbscan(xy, eps = eps, minPts = minPts)
+      cl  <- fit$cluster
+      n   <- length(cl)
+      n_noise <- sum(cl == 0)
+      noise_frac <- n_noise / n
+      n_clu <- length(unique(cl[cl > 0]))
+
+      if (verbose) {
+        message(sprintf("image=%s iter=%d eps=%.3f  clusters=%d  noise=%.3f",
+                        im, it, eps, n_clu, noise_frac))
+      }
+
+      if (is.null(best) || abs(noise_frac - target_outlier) < abs(best$noise_frac - target_outlier)) {
+        best <- list(eps = eps, cl = cl, noise_frac = noise_frac, n_clu = n_clu)
+      }
+
+      if ((noise_frac > 0 && noise_frac <= max_outlier) || it >= max_iter) break
+
+      if (noise_frac == 0 || n_clu <= 1) {
+        eps <- eps * 0.85 
+      } else if (noise_frac < target_outlier) {
+        eps <- eps * 0.90
+      } else if (noise_frac > max_outlier) {
+        eps <- eps * 1.10 
+      }
+    }
+
+    cl <- best$cl
+    if (all(cl == 0)) {
+      r  <- as.numeric(quantile(nn1, probs = 0.90, na.rm = TRUE)) * 1.2
+      fr <- dbscan::frNN(xy, eps = r)
+      comp <- rep(0L, nrow(xy)); comp_id <- 0L
+      adj <- fr$id
+      for (i in seq_len(nrow(xy))) {
+        if (comp[i] != 0L) next
+        comp_id <- comp_id + 1L
+        stack <- i
+        while (length(stack)) {
+          v <- stack[[1]]; stack <- stack[-1]
+          if (comp[v] != 0L) next
+          comp[v] <- comp_id
+          neighbors <- adj[[v]]
+          neighbors <- neighbors[neighbors > 0]
+          stack <- c(stack, neighbors)
+        }
+      }
+      main <- which.max(tabulate(comp))
+      keep <- rownames(coords)[comp == main]
+      drop <- setdiff(rownames(coords), keep)
+    } else {
+      main_cl <- as.integer(names(which.max(table(cl[cl > 0]))))
+      keep <- rownames(coords)[cl == main_cl]
+      drop <- setdiff(rownames(coords), keep)
+    }
+
+    obj@meta.data[keep, flag_name]  <- 1L
+    obj@meta.data[drop, island_col] <- TRUE
+  }
+  obj
+}
+
+
+
+for (id in names(ALL)) {
+  message(sprintf("==== %s ====", id))
+  ALL[[id]] <- TagSpatialIslands_DBSCAN_auto(
+    ALL[[id]],
+    minPts = 10,
+    q_start = 0.75,
+    mult_start = 1.2,
+    target_outlier = 0.002,
+    max_outlier = 0.10,
+    verbose = TRUE
+  )
+}
+
+do.call(rbind, lapply(ALL, function(x) {
+  c(
+    total = ncol(x),
+    kept  = sum(x$in_tissue_spatial == 1, na.rm = TRUE),
+    island= sum(x$spatial_island,        na.rm = TRUE)
+  )
+}))
+
+```
+
+```{r}
+for (id in names(ALL)) {
+  im <- Images(ALL[[id]])[1]
+  print(
+    SpatialDimPlot(ALL[[id]], group.by = "spatial_island") + ggtitle(id)
+  )
+}
+```
+```{r}
+for (id in names(ALL)) {
+  v <- ALL[[id]]$spatial_island
+  vlog <- as.logical(as.character(v))
+  keep <- rownames(ALL[[id]]@meta.data)[is.na(vlog) | !vlog]
+  ALL[[id]] <- subset(ALL[[id]], cells = keep)
+}
+
+```
+
+```{r}
+for (id in names(ALL)) {
+  im <- Images(ALL[[id]])[1]
+  print(
+    SpatialDimPlot(ALL[[id]], group.by = "spatial_island") + ggtitle(id)
+  )
+}
+```
+
+```{r}
+saveRDS(ALL, "ALLlist")
+```
+
+

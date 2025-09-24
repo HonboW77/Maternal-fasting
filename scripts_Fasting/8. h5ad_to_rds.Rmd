@@ -1,0 +1,70 @@
+```{r}
+rm(list = ls())
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+```
+
+
+```{r}
+AL1 = schard::h5ad2seurat_spatial('C:/R/Spatial_R/b2c_final_results/AL1_b2c.h5ad', img.res = "hires")
+
+saveRDS(AL1, "AL1_b2c.rds")
+
+rm(AL1)
+```
+
+
+```{r}
+AL2 = schard::h5ad2seurat_spatial('C:/R/Spatial_R/b2c_final_results/AL2_b2c.h5ad', img.res = "hires")
+
+saveRDS(AL2, "AL2_b2c.rds")
+
+rm(AL2)
+```
+
+
+```{r}
+Fast1 = schard::h5ad2seurat_spatial('C:/R/Spatial_R/b2c_final_results/Fast1_b2c.h5ad', img.res = "hires")
+
+saveRDS(Fast1, "Fast1_b2c.rds")
+
+rm(Fast1)
+```
+
+```{r}
+Fast2 = schard::h5ad2seurat_spatial('C:/R/Spatial_R/b2c_final_results/Fast2_b2c.h5ad', img.res = "hires")
+
+saveRDS(Fast2, "Fast2_b2c.rds")
+
+rm(Fast2)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
