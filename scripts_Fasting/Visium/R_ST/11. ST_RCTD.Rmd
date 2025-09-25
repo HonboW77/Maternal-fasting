@@ -1,0 +1,183 @@
+```{r}
+rm(list = ls())
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(spacexr)
+library(SeuratWrappers)
+library(Banksy)
+library(writexl)
+library(harmony)
+set.seed(77)
+```
+
+### Functions 
+
+```{r}
+Norm <- function(obj) {
+  obj <- NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 10000)
+  obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 3000)
+  return(obj)
+}
+```
+
+
+```{r}
+RunRCTD <- function(obj) {
+  DefaultAssay(obj) <- "Spatial"
+  counts_hd <- obj[["Spatial"]]$counts
+  counts_hd <- round(counts_hd)
+  cortex_cells_hd <- colnames(obj[["Spatial"]])
+  coords <- GetTissueCoordinates(obj)[cortex_cells_hd, 1:2]
+  query <- SpatialRNA(coords, counts_hd, colSums(counts_hd))
+  RCTD <- create.RCTD(query, reference, max_cores = 10)
+  RCTD <- run.RCTD(RCTD, doublet_mode = "doublet")
+  obj <- AddMetaData(obj, metadata = RCTD@results$results_df)
+  gc()
+  return(obj)
+}
+```
+
+```{r}
+ALL <- readRDS("ALLlist")
+```
+
+
+```{r}
+## ---- QC ----
+ALL <- lapply(ALL, function(obj) {
+  obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^mt-")
+  obj
+})
+
+
+keep_fraction <- 0.99
+
+ALL <- lapply(ALL, function(obj) {
+  thr_count  <- quantile(obj$nCount_Spatial, 1 - keep_fraction, na.rm = TRUE)
+  thr_feat   <- quantile(obj$nFeature_Spatial, 1 - keep_fraction, na.rm = TRUE)
+  keep <- obj$nCount_Spatial >= thr_count & obj$nFeature_Spatial >= thr_feat & obj$percent.mt < 10
+  subset(obj, cells = colnames(obj)[keep])
+})
+
+
+CLN <- lapply(ALL, function(obj) {
+  DefaultAssay(obj) <- "Spatial"
+  mat <- GetAssayData(obj, layer = "counts")
+  keep_feat <- Matrix::rowSums(mat > 0) >= 50
+  obj <- subset(obj, features = rownames(mat)[keep_feat])
+})
+
+rm(ALL)
+```
+
+
+### Integration with scRNA-seq data (deconvolution)
+
+
+```{r}
+ref <- readRDS("C:/R/SingleCell_R/renamed_0703.rds")
+Idents(ref) <- "bulktype"
+table(ref$bulktype)
+
+counts <- ref[["RNA"]]$counts
+cluster <- as.factor(ref$bulktype)
+nUMI <- ref$nCount_RNA
+levels(cluster) <- gsub("/", "-", levels(cluster))
+cluster <- droplevels(cluster)
+reference <- Reference(counts, cluster, nUMI)
+```
+
+
+```{r}
+## ---- Run RCTD ----
+CLN <- CLN %>% lapply(RunRCTD)
+```
+
+
+
+```{r}
+mer <- merge(CLN[[1]], y = CLN[2:length(CLN)])
+mer <- Norm(mer)
+mer <- JoinLayers(mer)
+```
+
+
+```{r}
+aggregated_counts <- AggregateExpression(
+  mer,
+  group.by = "Sample",
+  assays = "Spatial",
+  layer = "counts",
+  return.seurat = FALSE
+)
+
+
+pseudo_bulk_counts <- as.data.frame(aggregated_counts$Spatial)
+pseudo_bulk_counts <- apply(pseudo_bulk_counts, 2, as.integer)
+
+pseudo_bulk_counts <- pseudo_bulk_counts[rowSums(pseudo_bulk_counts) >= 20, , drop = FALSE]
+
+rownames(pseudo_bulk_counts) <- rownames(aggregated_counts$Spatial)
+
+print(head(pseudo_bulk_counts[,1:4], 5))
+```
+
+```{r}
+col_data <- unique(mer@meta.data[, c("Sample", "group")])
+
+rownames(col_data) <- col_data$Sample
+col_data <- col_data[colnames(pseudo_bulk_counts), ]
+
+col_data$Sample <- NULL
+
+print(col_data)
+```
+
+### Generate DE result for RRHO2 (Table S10. DEGs_ST_for_RRHO.xlsx)
+
+```{r}
+library(DESeq2)
+dds <- DESeqDataSetFromMatrix(
+  countData = pseudo_bulk_counts,
+  colData = col_data,
+  design = ~ group
+)
+
+
+dds <- DESeq(dds)
+
+deseq_res <- results(dds, contrast = c("group", "Fast", "AL"))
+deseq_res <- as.data.frame(deseq_res)
+deseq_res$gene <- row.names(deseq_res)
+
+write_xlsx(deseq_res, "Table S10. DEGs_ST_for_RRHO.xlsx")
+```
+
+
+```{r}
+saveRDS(CLN, "0818AfterBanksyandRCTD")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
