@@ -8,35 +8,35 @@ library(dplyr)
 
 
 ```{r}
-AL1 = schard::h5ad2seurat_spatial('C:/R/Spatial_R/b2c_final_results/AL1_b2c.h5ad', img.res = "hires")
+AL1 = schard::h5ad2seurat_spatial('C:/Users/Hongbo/PycharmProjects/Spatial_py/16um/AL1_adataforR.h5ad', img.res = "hires")
 
-saveRDS(AL1, "AL1_b2c.rds")
+saveRDS(AL1, "AL1_mpfc.rds")
 
 rm(AL1)
 ```
 
 
 ```{r}
-AL2 = schard::h5ad2seurat_spatial('C:/R/Spatial_R/b2c_final_results/AL2_b2c.h5ad', img.res = "hires")
+AL2 = schard::h5ad2seurat_spatial('C:/Users/Hongbo/PycharmProjects/Spatial_py/16um/AL2_adataforR.h5ad', img.res = "hires")
 
-saveRDS(AL2, "AL2_b2c.rds")
+saveRDS(AL2, "AL2_mpfc.rds")
 
 rm(AL2)
 ```
 
 
 ```{r}
-Fast1 = schard::h5ad2seurat_spatial('C:/R/Spatial_R/b2c_final_results/Fast1_b2c.h5ad', img.res = "hires")
+Fast1 = schard::h5ad2seurat_spatial('C:/Users/Hongbo/PycharmProjects/Spatial_py/16um/Fast1_adataforR.h5ad', img.res = "hires")
 
-saveRDS(Fast1, "Fast1_b2c.rds")
+saveRDS(Fast1, "Fast1_mpfc.rds")
 
 rm(Fast1)
 ```
 
 ```{r}
-Fast2 = schard::h5ad2seurat_spatial('C:/R/Spatial_R/b2c_final_results/Fast2_b2c.h5ad', img.res = "hires")
+Fast2 = schard::h5ad2seurat_spatial('C:/Users/Hongbo/PycharmProjects/Spatial_py/16um/Fast2_adataforR.h5ad', img.res = "hires")
 
-saveRDS(Fast2, "Fast2_b2c.rds")
+saveRDS(Fast2, "Fast2_mpfc.rds")
 
 rm(Fast2)
 ```
