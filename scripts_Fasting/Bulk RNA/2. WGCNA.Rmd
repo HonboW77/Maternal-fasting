@@ -1,0 +1,514 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+rm(list = ls())
+library(SummarizedExperiment)
+library(readxl)
+library(impute)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(ggplot2)
+library(ggforce)
+library(tidyr)
+library(dplyr) 
+library(tibble)
+library(DESeq2)
+library(limma)
+library(EnhancedVolcano)
+library(pheatmap)
+library(RColorBrewer)
+library(ggrepel)
+library(plotly)
+library(writexl)
+library(WGCNA)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+library(reshape2)
+library(igraph)
+set.seed(77)
+```
+
+
+---
+
+```{r}
+mer <- readRDS("forWGCNA_bulkRNA.rds")
+```
+
+```{r}
+dim(mer)
+rowData(mer)
+table(rowData(mer)$`Gene Type`)
+gt <- rowData(mer)$`Gene Type`
+gn <- rowData(mer)$`Gene Name`
+
+drop <- grepl("pseudogene", gt, ignore.case = TRUE) | grepl("^Gm", gn)
+mer <- mer[!drop, , drop = FALSE]
+
+table(gt[drop], useNA = "ifany")
+table(rowData(mer)$`Gene Type`)
+dim(mer)
+```
+
+```{r}
+dds <- DESeqDataSet(mer, design = ~ 1)
+nor_mer <- vst(dds, blind = TRUE)
+```
+
+```{r}
+mat  <- assay(nor_mer)                 # genes x samples
+```
+
+
+```{r}
+pheno <- as.data.frame(colData(mer))
+sex   <- factor(pheno$sex)
+group <- factor(pheno$group)
+mat <- removeBatchEffect(mat, covariates = model.matrix(~ sex)[, -1, drop = FALSE])
+
+pc <- prcomp(t(mat))$x
+
+pch_vec <- ifelse(sex == "Male", 17, 16)
+col_vec <- ifelse(group == "AL", "blue", "red")
+
+plot(
+  pc,
+  pch  = pch_vec,
+  col  = col_vec,
+  xlab = "PC1",
+  ylab = "PC2"
+)
+
+legend(
+  "topright",
+  legend = c("Male", "Female", "AL", "FAST"),
+  pch    = c(17, 16, 16, 16),
+  col    = c("black", "black", "blue", "red"),
+  bty    = "n"
+)
+```
+
+---
+
+```{r}
+expr <- as.data.frame(t(mat))
+names(expr) <- rowData(nor_mer)$`Gene Name`
+
+dim(expr)
+```
+
+
+```{r}
+gsg = goodSamplesGenes(expr, verbose = 4);
+gsg$allOK
+```
+
+
+```{r}
+sampleTree <- hclust(dist(expr), method = "average")
+plot(sampleTree, main = "Sample clustering", sub = "", xlab = "")
+```
+
+```{r}
+trait0 <- as.data.frame(colData(mer))
+
+datTraits <- data.frame(
+  groupFAST = as.numeric(trait0$group == "FAST"),
+  sexMale   = as.numeric(trait0$sex  == "Male"),
+  group     = factor(trait0$group, levels = c("FAST", "AL")),
+  sex       = factor(trait0$sex, levels = c("Male", "Female"))
+)
+
+rownames(datTraits) <- rownames(trait0)
+
+datTraits <- datTraits[rownames(expr), , drop = FALSE]
+stopifnot(identical(rownames(expr), rownames(datTraits)))
+
+datTraits
+```
+
+```{r}
+powers <- 1:20
+
+sft <-  pickSoftThreshold(expr, powerVector = powers,
+                          networkType = "signed",
+                          verbose = 5)
+sft$powerEstimate
+```
+
+
+```{r}
+par(mfrow = c(1,2))
+cex1 <-  0.85
+plot(sft$fitIndices[,1],
+     -sign(sft$fitIndices[,3]) * sft$fitIndices[,2],
+     xlab = "Soft Threshold (power)",
+     ylab = "Scale Free Topology Model Fit, signed R^2",
+     type = "n",
+     main = "Scale independence")
+
+text(sft$fitIndices[,1],
+     -sign(sft$fitIndices[,3]) * sft$fitIndices[,2],
+     labels = powers,
+     cex = cex1,
+     col = "red")
+
+abline(h = 0.90, col = "red")
+
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+```
+
+
+```{r}
+net <-  blockwiseModules(expr,
+                         power = 9, # 9
+                         maxBlockSize = ncol(expr) + 1,
+                         minModuleSize = 50, # 50
+                         mergeCutHeight = 0.35, # 0.35
+                         deepSplit = 2,
+                         saveTOMs = T,
+                         numericLabels= T,
+                         networkType = "signed",
+                         TOMType = "signed",
+                         saveTOMFileBase = "10WFASTTOM",
+                         pamStage = F,
+                         verbose = 3)
+table(net$colors)
+```
+```{r}
+# saveRDS(net, "BulkRNA_WGCNA_net.rds")
+```
+```{r}
+net <- readRDS("BulkRNA_WGCNA_net.rds")
+```
+
+
+
+```{r}
+# moduleColors = labels2colors(net$colors)
+plotDendroAndColors(net$dendrograms[[1]], net$colors,
+                    c("Module Colors"),
+                    dendroLabels = FALSE, hang = 0.02,
+                    addGuide = TRUE, guideHang = 0.05)
+```
+
+
+
+```{r}
+moduleColors = labels2colors(net$colors)
+MEs0 = moduleEigengenes(expr, moduleColors)$eigengenes
+
+MEs = orderMEs(MEs0)
+
+plotEigengeneNetworks(
+  MEs,
+  "Eigengene adjacency heatmap",
+  marHeatmap = c(3,4,2,2),
+  plotDendrograms = F,
+  xLabelsAngle = 90,
+  heatmapColors = colorRampPalette(c("#3C8DAD", "white", "#FF6767"))(50),
+  xColorWidth = 1.5 * strheight("M"),
+  yColorWidth = 1.5 * strwidth("M")
+)
+```
+
+
+
+```{r}
+moduleColors <- labels2colors(net$colors)
+
+MElist <- moduleEigengenes(expr, colors = moduleColors, excludeGrey = TRUE)
+MEs <- orderMEs(MElist$eigengenes)
+
+datTraits <- datTraits[rownames(expr), , drop = FALSE]
+modNames <- colnames(MEs)
+
+MEtrait_by_sex <- function(MEs, datTraits, sex_value, trait_col, sex_col = "sex") {
+  keep <- datTraits[[sex_col]] == sex_value
+  
+  MEs_sub   <- MEs[keep, , drop = FALSE]
+  trait_sub <- as.data.frame(datTraits[[trait_col]][keep])
+  colnames(trait_sub) <- trait_col
+  
+  nSamples <- nrow(MEs_sub)
+  cor_mat  <- cor(MEs_sub, trait_sub, use = "p", method = "pearson")
+  p_mat    <- corPvalueStudent(cor_mat, nSamples)
+  
+  list(cor = cor_mat, p = p_mat, n = nSamples)
+}
+
+ME_male   <- MEtrait_by_sex(MEs, datTraits, "Male",   "groupFAST")
+ME_female <- MEtrait_by_sex(MEs, datTraits, "Female", "groupFAST")
+```
+
+
+
+```{r}
+cor_male   <- ME_male$cor
+p_male     <- ME_male$p
+cor_female <- ME_female$cor
+p_female   <- ME_female$p
+
+
+mods <- intersect(rownames(cor_male), rownames(cor_female))
+
+mat_cor <- cbind(
+  Male   = cor_male[mods, 1],
+  Female = cor_female[mods, 1]
+)
+
+mat_p <- cbind(
+  Male   = p_male[mods, 1],
+  Female = p_female[mods, 1]
+)
+
+ord <- order(mat_cor[, "Male"], decreasing = TRUE)
+mat_cor <- mat_cor[ord, , drop = FALSE]
+mat_p   <- mat_p[ord, , drop = FALSE]
+stopifnot(identical(rownames(mat_cor), rownames(mat_p)))
+```
+
+```{r}
+mod_color_order <- gsub("^ME[_]?", "", mods[ord])
+col_by_gene <- labels2colors(net$colors)
+num_by_col  <- tapply(net$colors, col_by_gene, function(z) unique(z)[1])
+
+stopifnot(all(mod_color_order %in% names(num_by_col)))
+stopifnot(all(vapply(split(net$colors, col_by_gene), function(z) length(unique(z)) == 1L, logical(1))))
+stopifnot(!("grey" %in% mod_color_order))
+
+mod_lab <- sprintf("M%d", num_by_col[mod_color_order])
+mod_color <- mod_color_order
+
+rownames(mat_cor) <- mod_lab
+rownames(mat_p)   <- mod_lab
+```
+
+```{r}
+# pvalue <- data.frame(
+#   module = rownames(mat_cor),
+#   module_color = mod_color,
+#   cor_male = mat_cor[, "Male"],
+#   p_male   = mat_p[, "Male"],
+#   cor_female = mat_cor[, "Female"],
+#   p_female   = mat_p[, "Female"],
+#   n_male   = ME_male$n,
+#   n_female = ME_female$n,
+#   row.names = NULL,
+#   check.names = FALSE
+# )
+# 
+# writexl::write_xlsx(pvalue, "MEtrait_by_sex_results.xlsx")
+```
+---
+
+
+
+
+
+
+
+
+
+
+```{r}
+moduleColors <- labels2colors(net$colors)
+
+num <- net$colors
+names(num) <- colnames(expr)
+table(num)
+table(num)
+
+num_by_col <- tapply(net$colors, labels2colors(net$colors), function(z) unique(z)[1])
+num_by_col
+```
+
+
+
+```{r}
+run_GO_by_num <- function(nums_keep) {
+  genes_by_num <- split(names(num), num)
+  genes_merged <- unique(unlist(genes_by_num[as.character(nums_keep)], use.names = FALSE))
+
+  gene <- unique(genes_merged)
+  univ <- unique(colnames(expr))
+
+  ego_bp <- enrichGO(
+    gene          = gene,
+    universe      = univ,
+    OrgDb         = org.Mm.eg.db,
+    keyType       = "SYMBOL",
+    ont           = "ALL",
+    pvalueCutoff  = 0.1,
+    pAdjustMethod = "BH",
+    qvalueCutoff  = 0.25,
+    readable      = TRUE
+  )
+  ego_bp
+}
+```
+
+```{r}
+nums_vec <- c(2, 24, 20, 12, 13)
+
+ego_list <- setNames(
+  lapply(nums_vec, run_GO_by_num),
+  paste0("M", nums_vec)
+)
+
+ego_list
+
+res_list <- lapply(names(ego_list), function(nm) {
+  df <- as.data.frame(ego_list[[nm]]@result)
+  df$Module <- nm
+  df
+})
+names(res_list) <- names(ego_list)
+
+# write_xlsx(res_list, "GO_ORA_WGCNA_modules.xlsx")
+```
+
+
+---
+```{r}
+# moduleColors = labels2colors(net$colors)
+# load("10WFASTTOM-block.1.RData")
+# attr(TOM, "Size")
+```
+
+```{r}
+plot_net_by_num <- function(mod_num,
+                            expr, net,
+                            tom_rdata = "10WFASTTOM-block.1.RData",
+                            n_inner = 10, n_outer = 15,
+                            n_conns = 500,
+                            edge.alpha = 0.08,
+                            edge.width = 1,
+                            vertex.label.cex = 0.8,
+                            vertex.size = 6) {
+
+  env <- new.env(parent = emptyenv())
+  load(tom_rdata, envir = env)
+  obj_names <- ls(env)
+
+  TOM_global <- env$TOM
+
+
+  TOM_global <- as.matrix(TOM_global)
+
+
+  geneNames <- colnames(expr)
+  stopifnot(!is.null(geneNames))
+
+  if (nrow(TOM_global) == length(geneNames)) {
+    dimnames(TOM_global) <- list(geneNames, geneNames)
+  } else {
+    stop(paste0("row TOM:", nrow(TOM_global), "length: expr", length(geneNames)))
+  }
+
+  mod_num_by_gene <- net$colors[geneNames]
+  idx <- which(mod_num_by_gene == mod_num)
+  genes_mod <- geneNames[idx]
+
+  genes_in_TOM <- intersect(genes_mod, colnames(TOM_global))
+  if(length(genes_in_TOM) == 0){
+      stop("genes_in_TOM: no gene")
+  }
+
+  moduleColors <- labels2colors(mod_num_by_gene)
+  names(moduleColors) <- geneNames
+  mod_col <- unique(moduleColors[genes_mod])[1]
+
+  MElist <- moduleEigengenes(expr, colors = moduleColors, excludeGrey = TRUE)
+  MEs    <- orderMEs(MElist$eigengenes)
+  kMEall <- signedKME(expr, MEs, outputColumnName = "kME")
+
+  kME_col <- grep(paste0("^kME(\\.ME)?", mod_col, "$"), colnames(kMEall), value = TRUE)
+  kME_mod <- setNames(kMEall[genes_in_TOM, kME_col], genes_in_TOM)
+
+  n_hubs <- n_inner + n_outer
+  hubs <- names(sort(abs(kME_mod), decreasing = TRUE))[1:min(n_hubs, length(kME_mod))]
+
+  A <- TOM_global[hubs, hubs, drop = FALSE]
+  diag(A) <- 0
+
+  ## -----------------------------
+  # top connections
+  ## -----------------------------
+  ut <- which(upper.tri(A), arr.ind = TRUE)
+  w  <- A[ut]
+  ord <- order(w, decreasing = TRUE, na.last = NA)
+  keep_n  <- min(n_conns, length(ord))
+  keep_ut <- ut[ord[1:keep_n], , drop = FALSE]
+
+  A2 <- matrix(0, nrow(A), ncol(A), dimnames = dimnames(A))
+  A2[keep_ut] <- A[keep_ut]
+  A2 <- A2 + t(A2)
+
+  r <- range(A2, na.rm = TRUE)
+  if (is.finite(r[1]) && diff(r) > 0) A2 <- (A2 - r[1]) / diff(r) else A2[] <- 0
+
+  edge_df <- reshape2::melt(A2, varnames = c("from", "to"), value.name = "weight")
+  edge_df <- subset(edge_df, weight > 0 & from != to)
+
+
+  inner <- hubs[1:min(n_inner, length(hubs))]
+  outer <- setdiff(hubs, inner)
+
+  xy_inner <- if (length(inner) > 1) igraph::layout_in_circle(igraph::make_empty_graph(length(inner))) / 2 else matrix(c(0,0),1,2)
+  xy_outer <- if (length(outer) > 1) igraph::layout_in_circle(igraph::make_empty_graph(length(outer))) else matrix(c(1,0),1,2)
+  xy <- rbind(xy_inner, xy_outer)
+  rownames(xy) <- c(inner, outer)
+  xy <- xy[hubs, , drop = FALSE]
+  ## -----------------------------
+  # top connections
+  ## -----------------------------
+  g <- igraph::graph_from_data_frame(edge_df, directed = FALSE, vertices = data.frame(name = hubs))
+  igraph::E(g)$col <- scales::alpha(mod_col, alpha = edge_df$weight)
+
+  plot(
+    g,
+    layout = jitter(as.matrix(xy)),
+    main = paste0("M", mod_num, " (", mod_col, ")"),
+    edge.color = adjustcolor(igraph::E(g)$col, alpha.f = edge.alpha),
+    edge.width = edge.width,
+    edge.curved = 0,
+    vertex.color = mod_col,
+    vertex.frame.color = "black",
+    vertex.size = vertex.size,
+    vertex.label = igraph::V(g)$name,
+    vertex.label.cex = vertex.label.cex,
+    vertex.label.color = "black",
+    vertex.label.family = "sans",
+    vertex.label.font = 2,
+    vertex.label.dist = 1.5,
+    vertex.label.degree = -pi/2
+  )
+
+  top_genes_df <- data.frame(Gene = hubs, kME_score = kME_mod[hubs], row.names = NULL)
+  return(top_genes = top_genes_df)
+}
+```
+
+
+```{r}
+# nums_vec <- c(2, 24, 20, 12, 15)
+plot_net_by_num(2, expr, net, vertex.label.cex = 1, edge.alpha = 0.1)
+plot_net_by_num(24, expr, net, vertex.label.cex = 1, edge.alpha = 1)
+plot_net_by_num(20, expr, net, vertex.label.cex = 1, edge.alpha = 0.5)
+plot_net_by_num(12, expr, net, vertex.label.cex = 1, edge.alpha = 1)
+plot_net_by_num(13, expr, net, vertex.label.cex = 1, edge.alpha = 1)
+```
+
+
+
+
+
+

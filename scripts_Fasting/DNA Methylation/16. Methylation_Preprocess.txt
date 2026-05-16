@@ -1,0 +1,296 @@
+library(minfi)
+library(IlluminaMouseMethylation285kMOLBRAINmanifest)
+library(IlluminaMouseMethylation285kMOLBRAINanno.ilm10a2.mm10)
+library(reshape)
+
+
+Sample_Annot_CSV<-"Sample_Annot.csv"
+
+Sample_Annot<-read.csv(
+	Sample_Annot_CSV,
+	row.names=1,header=TRUE
+)
+
+Targets <- read.metharray.sheet(base=".",pattern = "SampleSheet")
+RGset <- read.metharray.exp(base="./Rawdata",targets=Targets)
+RGset@annotation<-c(array="IlluminaMouseMethylation285kMOLBRAIN",annotation="ilm10a2.mm10")
+sampNames <- rownames(pData(RGset))
+
+####### QC ###########################
+r <- getRed(RGset)
+g <- getGreen(RGset)
+QControls<-c("BISULFITE CONVERSION I","BISULFITE CONVERSION II","EXTENSION","HYBRIDIZATION","NON-POLYMORPHIC","SPECIFICITY I","SPECIFICITY II","TARGET REMOVAL")
+allQCs<-data.frame()
+for (QCindex in 1:length(QControls)){
+	controlType <- QControls[QCindex]
+	ctrlAddress <- getControlAddress(RGset, controlType = controlType)
+	ctlWideR <- as.matrix(log2(r[ctrlAddress, , drop = FALSE]))
+	ctlWideG <- as.matrix(log2(g[ctrlAddress, , drop = FALSE]))
+	ctlR <- melt(ctlWideR, varnames = c("address", "sample"))
+	ctlG <- melt(ctlWideG, varnames = c("address", "sample"))
+	ctl <- rbind(cbind(channel = "Red", ctlR), cbind(channel = "Green", ctlG))
+	ctl$QC<-controlType
+	allQCs<-rbind(allQCs,ctl)
+}
+#write.csv(allQCs,QCFILENAME<-"allQC.csv",row.names=FALSE)
+allQCs$sample <- as.factor(allQCs$sample)
+library(lattice)
+##> summary(allQCs[,"value"])
+##   Min. 1st Qu.  Median    Mean 3rd Qu.    Max.
+##  5.700   7.806   8.335   9.028   9.295  14.741
+xlim <- c(4, 16)
+pdf("QC_probes.pdf",height=13,width=6)
+figslist<-list()
+for (CTRLINDEX in 1:length(QControls)){
+	controlType <- QControls[CTRLINDEX]
+	tempfig <- xyplot(
+		x = sample ~ value | channel,
+		groups = channel,
+		data = allQCs[which(allQCs$QC==controlType),],
+		#las=1,
+		horizontal = TRUE,
+		pch = 1,
+		cex = 1,
+		col = c("darkgreen","magenta"),
+		xlab = "Log2 Intensity",
+		xlim = xlim,
+		main = controlType,
+		scales=list(y=list(cex=1)),
+		layout = c(2, 1) ,
+		panel = function(x, y, ...) {
+			panel.stripplot(x, y, ...)
+			
+		}
+	)
+	figslist[[CTRLINDEX]]<-tempfig
+}
+for (FIGNUM in 1:length(QControls)){
+	print(figslist[[FIGNUM]])
+}
+dev.off()
+
+
+mset.preprocessIllumina<-preprocessIllumina(RGset, bg.correct = FALSE, normalize = c("no"), reference = 1)
+RawBeta<-getBeta(mset.preprocessIllumina)
+plotQCint<-function(qc, mainTitle){
+    badSampleCutoff = 10.5
+    meds <- (qc$mMed + qc$uMed)/2
+    whichBad <- which((meds < badSampleCutoff))
+    plot(qc$mMed, qc$uMed, xlim = c(8, 14), ylim = c(8, 14),
+        main=mainTitle,
+        xaxt = "n", yaxt = "n", xlab = "Meth median intensity (log2)",
+        ylab = "Unmeth median intensity (log2)", col = ifelse(1:nrow(qc) %in%
+            whichBad, "red", "black"))
+    axis(side = 1, at = c(9, 11, 13))
+    axis(side = 2, at = c(9, 11, 13))
+    abline(badSampleCutoff * 2, -1, lty = 2)
+    if (length(whichBad) > 0) {
+        text(qc$mMed[whichBad], qc$uMed[whichBad] - 0.25, labels = whichBad,
+            col = "red")
+    }
+    legend("topleft", legend = c("good", "bad, with sample index"),
+        pch = 1, col = c("black", "red"), bty = "n")
+    invisible(NULL)
+}
+pdf("QCplot_medianInt.pdf")
+plotQCint(getQC(mset.preprocessIllumina),"Raw Bata (not normalized)\nbadSampleCutoff = 10.5")
+dev.off()
+
+
+
+detP <- detectionP(RGset)
+probe.PassedDetP <- rownames(detP)[which(apply(detP,1,max)<0.01)]
+
+probe.CGprobe <- rownames(detP)[grep("cg",rownames(detP))]
+
+locations<-IlluminaMouseMethylation285kMOLBRAINanno.ilm10a2.mm10::Locations
+##> levels(factor(locations$chr))
+## [1] "chr1"  "chr10" "chr11" "chr12" "chr13" "chr14" "chr15" "chr16" "chr17"
+##[10] "chr18" "chr19" "chr2"  "chr3"  "chr4"  "chr5"  "chr6"  "chr7"  "chr8"
+##[19] "chr9"  "chrMT" "chrX"  "chrY"
+probe.Sexchr <- rownames(detP)[grep("chr[XY]",locations$chr)]
+
+#probe.OK <- setdiff(probe.PassedDetP,probe.Sexchr)
+
+probe.OK <- sort(setdiff(probe.CGprobe,probe.Sexchr))
+##> probe.OK <- sort(setdiff(probe.CGprobe,probe.Sexchr))
+##> length(probe.OK)
+##[1] 266144
+
+
+
+
+##> length(intersect(grep("cg",rownames(detP)),grep("_TC11",rownames(detP))))
+##[1] 29389
+##> length(intersect(grep("cg",rownames(detP)),grep("_TC12",rownames(detP))))
+##[1] 380
+##> length(intersect(grep("cg",rownames(detP)),grep("_TC21",rownames(detP))))
+##[1] 110491
+##> length(intersect(grep("cg",rownames(detP)),grep("_TC22",rownames(detP))))
+##[1] 394
+##> length(intersect(grep("cg",rownames(detP)),grep("_BC11",rownames(detP))))
+##[1] 30896
+##> length(intersect(grep("cg",rownames(detP)),grep("_BC12",rownames(detP))))
+##[1] 351
+##> length(intersect(grep("cg",rownames(detP)),grep("_BC21",rownames(detP))))
+##[1] 110804
+##> length(intersect(grep("cg",rownames(detP)),grep("_BC22",rownames(detP))))
+##[1] 356
+
+
+
+
+
+pdf("PercentLowDetP.pdf")
+par(mar=c(5,12,4,2))
+pldp<-apply(detP,2,function(X){length(which(X>0.01))/length(X)*100})
+nldp<-apply(detP,2,function(X){length(which(X>0.01))})
+nldp_y<-barplot(nldp,las=1,horiz=T,xlab=paste0("# of detP<0.01 probes (total ",nrow(detP)," probes)"),col="pink")
+text(0.1,nldp_y,paste0(sprintf("%1.4f",pldp),"%"),adj=c(0,NA),cex=.8)
+dev.off()
+#par(mar=c(5, 4, 4, 2) + 0.1)
+
+mset<-preprocessNoob(RGset)
+
+Beta <- getBeta(mset)
+meth <- getMeth(mset)
+unmeth <- getUnmeth(mset)
+Mval <- log2((meth + 100)/(unmeth + 100))
+#Mval <- getM(mset.preprocessNoob)
+
+if(length(which(rownames(Beta)!=rownames(RawBeta)))>0){print("no")}else{print("OK")}
+if(length(which(rownames(Beta)!=rownames(detP)))>0){print("no")}else{print("OK")}
+if(length(which(rownames(Beta)!=rownames(meth)))>0){print("no")}else{print("OK")}
+if(length(which(rownames(Beta)!=rownames(unmeth)))>0){print("no")}else{print("OK")}
+
+
+
+
+
+
+#Beta[probe.CGprobe],
+#A2<- read.csv("MouseMethylation-12v1-0_A2.csv",skip=7)
+
+
+
+
+
+
+dataMatrix<-as.matrix(Beta[probe.OK,])
+tmatirx<-t(dataMatrix)
+PCA <- prcomp(tmatirx, scale= TRUE)
+PCA$loading <- PCA$rotation
+for(i in 1:length(PCA$sdev)) {
+    PCA$loading[,i] <- PCA$rotation[,i] * PCA$sdev[i]
+}
+PropVar <- PCA$sdev * PCA$sdev/sum(PCA$sdev * PCA$sdev)*100
+OVER80 <- 0
+for (test80 in 1:length(PCA$sdev)){
+    if(sum(PropVar[1:test80])<80){
+        OVER80 <- test80
+    }
+}
+OVER80 <- OVER80 +1
+# confirm OVER80
+sum(PropVar[1:OVER80]) > 80
+##> OVER80
+##[1] 7
+
+
+
+illust_PCA <-function(pcadata,pcpair,pointcex,pointcol_legend,pointcol,pointpch_legend,pointpch,legends,closeup,legendcex){
+MAX_XY<-ceiling(max(abs(pcadata$x[,pcpair])))
+persent_X <- round(PropVar[pcpair[1]],digits=1)
+persent_Y <- round(PropVar[pcpair[2]],digits=1)
+xlabel <- paste(colnames(pcadata$x)[pcpair[1]]," (",persent_X,"%)",sep="")
+ylabel <- paste(colnames(pcadata$x)[pcpair[2]]," (",persent_Y,"%)",sep="")
+plot(
+   x=NULL,type="n",
+   xlim=c(-1 * MAX_XY/closeup, MAX_XY/closeup),
+   ylim=c(-1 * MAX_XY/closeup, MAX_XY/closeup),
+   xlab=xlabel,ylab=ylabel
+)
+legend("topright",legend=legends,text.col="black",pch=pointpch_legend,col=pointcol_legend,cex=legendcex)
+points(pcadata$x[,pcpair],cex=pointcex,col=pointcol,pch=pointpch)
+}
+
+
+#COL_loading <- "#ff8c0066"
+#COL_plot <- "#22222250"
+
+pdf("PCA_beta.pdf",width=14,height=10)
+par(mfrow=c(3,2))
+ANN<-"Box"
+PCPAIR=c(1,2)
+POINTCEX=1
+POINTCOL_LEGEND=c("blue","orange")
+POINTPCH_LEGEND=c(1:2)
+POINTCOL=POINTCOL_LEGEND[factor(Sample_Annot[,ANN])]
+POINTPCH=POINTPCH_LEGEND[factor(Sample_Annot[,ANN])]
+LEGENDS=paste(ANN,levels(factor(Sample_Annot[,ANN])))
+CLOSEUP=0.7
+LEGENDCEX=1
+illust_PCA(PCA,PCPAIR,POINTCEX,POINTCOL_LEGEND,POINTCOL,POINTPCH_LEGEND,POINTPCH,LEGENDS,CLOSEUP,LEGENDCEX)
+#text(PCA$x[which(PCA$x[,"PC1"]>200),c("PC1","PC2")],names(PCA$x[which(PCA$x[,"PC1"]>200),"PC1"]),cex=.7,adj=c(NA,-1))
+
+ANN<-"NeuN"
+PCPAIR=c(1,2)
+POINTCEX=1
+POINTCOL_LEGEND=c("red","green3")
+POINTPCH_LEGEND=c(1:2)
+POINTCOL=POINTCOL_LEGEND[factor(Sample_Annot[,ANN])]
+POINTPCH=POINTPCH_LEGEND[factor(Sample_Annot[,ANN])]
+LEGENDS=paste(ANN,levels(factor(Sample_Annot[,ANN])))
+CLOSEUP=0.7
+LEGENDCEX=1
+illust_PCA(PCA,PCPAIR,POINTCEX,POINTCOL_LEGEND,POINTCOL,POINTPCH_LEGEND,POINTPCH,LEGENDS,CLOSEUP,LEGENDCEX)
+
+ANN<-"Type"
+PCPAIR=c(1,2)
+POINTCEX=1
+POINTCOL_LEGEND=c("red","green3","blue","orange")
+POINTPCH_LEGEND=c(1:4)
+POINTCOL=POINTCOL_LEGEND[factor(Sample_Annot[,ANN])]
+POINTPCH=POINTPCH_LEGEND[factor(Sample_Annot[,ANN])]
+LEGENDS=paste(levels(factor(Sample_Annot[,ANN])))
+CLOSEUP=0.7
+LEGENDCEX=1
+illust_PCA(PCA,PCPAIR,POINTCEX,POINTCOL_LEGEND,POINTCOL,POINTPCH_LEGEND,POINTPCH,LEGENDS,CLOSEUP,LEGENDCEX)
+
+ANN<-"Source"
+PCPAIR=c(1,2)
+POINTCEX=1
+POINTCOL_LEGEND=c(1:12)
+POINTPCH_LEGEND=c(1:12)
+POINTCOL=POINTCOL_LEGEND[factor(Sample_Annot[,ANN])]
+POINTPCH=POINTPCH_LEGEND[factor(Sample_Annot[,ANN])]
+LEGENDS=paste(levels(factor(Sample_Annot[,ANN])))
+CLOSEUP=0.7
+LEGENDCEX=1
+illust_PCA(PCA,PCPAIR,POINTCEX,POINTCOL_LEGEND,POINTCOL,POINTPCH_LEGEND,POINTPCH,LEGENDS,CLOSEUP,LEGENDCEX)
+
+ANN<-"Sentrix_ID"
+PCPAIR=c(1,2)
+POINTCEX=1
+POINTCOL_LEGEND=c("red","orange")
+POINTPCH_LEGEND=c(1:4)
+POINTCOL=POINTCOL_LEGEND[factor(Sample_Annot[,ANN])]
+POINTPCH=POINTPCH_LEGEND[factor(Sample_Annot[,ANN])]
+LEGENDS=paste(levels(factor(Sample_Annot[,ANN])))
+CLOSEUP=0.7
+LEGENDCEX=1
+illust_PCA(PCA,PCPAIR,POINTCEX,POINTCOL_LEGEND,POINTCOL,POINTPCH_LEGEND,POINTPCH,LEGENDS,CLOSEUP,LEGENDCEX)
+
+ANN<-"Sentrix_Position"
+PCPAIR=c(1,2)
+POINTCEX=1
+POINTCOL_LEGEND=c(1:8)
+POINTPCH_LEGEND=c(1:8)
+POINTCOL=POINTCOL_LEGEND[factor(Sample_Annot[,ANN])]
+POINTPCH=POINTPCH_LEGEND[factor(Sample_Annot[,ANN])]
+LEGENDS=paste(levels(factor(Sample_Annot[,ANN])))
+CLOSEUP=0.7
+LEGENDCEX=1
+illust_PCA(PCA,PCPAIR,POINTCEX,POINTCOL_LEGEND,POINTCOL,POINTPCH_LEGEND,POINTPCH,LEGENDS,CLOSEUP,LEGENDCEX)
+par(mfrow=c(1,1))
+dev.off()

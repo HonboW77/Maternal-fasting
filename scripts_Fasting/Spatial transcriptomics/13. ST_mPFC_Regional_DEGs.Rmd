@@ -1,0 +1,161 @@
+```{r}
+rm(list = ls())
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(SeuratWrappers)
+library(writexl)
+library(readxl)
+library(ggplot2)
+library(ggforce)
+library(tidyr)
+library(dplyr) 
+library(tibble)
+library(pheatmap)
+library(RColorBrewer)
+library(ggrepel)
+library(plotly)
+library(writexl)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(scRNAtoolVis)
+set.seed(77)
+result <- "Results"
+```
+
+
+```{r}
+Norm <- function(obj) {
+  obj <- NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 10000)
+  obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 3000)
+  return(obj)
+}
+```
+
+```{r}
+CLN <- readRDS('0818AfterBanksyandRCTD')
+```
+
+```{r}
+mer <- merge(CLN[[1]], y = CLN[2:length(CLN)])
+```
+
+
+
+```{r}
+mer <- Norm(mer)
+mer <- JoinLayers(mer)
+```
+
+
+```{r}
+DefaultAssay(mer) <- "Spatial"
+Idents(mer) <- "annotation"
+
+type <- unique(mer$annotation)
+res_list <- setNames(vector("list", length(type)), type)
+```
+
+### Generate pseudoBulk Count matrix and Run DESeq
+
+```{r}
+mer <- subset(mer, subset = annotation =="mPFC")
+
+for (reg in type) {
+  cells_use <- WhichCells(mer, expression = annotation == reg)
+  if (length(cells_use) == 0) {
+    message("Skip region ", reg, " (no cells)")
+    next
+  }
+  seu_sub <- subset(mer, cells = cells_use)
+
+  aggregated_counts <- AggregateExpression(
+    seu_sub,
+    group.by = "Sample",
+    assays   = "Spatial",
+    slot     = "counts",
+    return.seurat = FALSE
+  )
+  counts <- as.data.frame(aggregated_counts$Spatial)
+  counts <- counts[rowSums(counts) >= 20, , drop = FALSE]
+
+    
+  col_data <- unique(seu_sub@meta.data[, c("Sample", "group")])
+  rownames(col_data) <- col_data$Sample
+  col_data <- col_data[colnames(counts), , drop = FALSE]
+  col_data$Sample <- NULL
+  col_data$group  <- factor(col_data$group, levels = c("AL","Fast"))
+
+  tab <- table(col_data$group)
+
+  cat("Region:", reg, " Samples:", paste(names(tab), tab, collapse=" "),
+      " Genes:", nrow(counts), "\n")
+
+
+  dds <- DESeqDataSetFromMatrix(countData = counts, colData = col_data, design = ~ group)
+  dds <- DESeq(dds)
+
+  deseq_res <- results(dds, contrast = c("group", "Fast", "AL"))
+  deseq_res <- as.data.frame(deseq_res)
+  deseq_res$gene <- rownames(deseq_res)
+
+  res_list[[reg]] <- deseq_res
+}
+```
+
+### Table S5. DEGs_mPFC.xlsx
+
+```{r}
+res_list <- res_list[!sapply(res_list, is.null)]
+writexl::write_xlsx(res_list, path = "Table S5. DEGs_mPFC.xlsx")
+```
+
+```{r}
+res <- read_excel("Table S5. DEGs_mPFC.xlsx")
+```
+
+
+```{r}
+library(clusterProfiler)
+library(org.Mm.eg.db)
+
+gene_data <- data.frame(
+  SYMBOL = res$gene,
+  stat = res$stat
+)
+
+gene_data <- gene_data[!is.na(gene_data$SYMBOL), ]
+
+
+gene_data <- aggregate(stat ~ SYMBOL, data = gene_data, FUN = mean)
+
+
+geneList <- gene_data$stat
+
+names(geneList) <- gene_data$SYMBOL
+
+geneList <- sort(geneList, decreasing = TRUE)
+
+head(geneList)
+```
+
+### Table S6. GSEA_mPFC.xlsx
+
+```{r fig.height=12, fig.width=10}
+gsea_go_results <- gseGO(
+  geneList     = geneList,
+  OrgDb        = org.Mm.eg.db,
+  keyType      = "SYMBOL",
+  ont          = "ALL",
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  verbose      = TRUE
+)
+cat("GSEA GO analysis complete.\n")
+
+temp <- as.data.frame(gsea_go_results@result)
+write_xlsx(temp, "Table S6. GSEA_mPFC.xlsx")
+```
+
+
+

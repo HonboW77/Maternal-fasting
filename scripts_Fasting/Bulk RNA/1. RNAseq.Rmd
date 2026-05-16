@@ -1,0 +1,191 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+rm(list = ls())
+library(SummarizedExperiment)
+library(readxl)
+library(impute)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(ggplot2)
+library(ggforce)
+library(tidyr)
+library(dplyr) 
+library(tibble)
+library(DESeq2)
+library(EnhancedVolcano)
+library(pheatmap)
+library(RColorBrewer)
+library(ggrepel)
+library(plotly)
+library(writexl)
+```
+
+---
+
+```{r}
+make_se <- function(orig, colData, sample_order) {
+  ordered_ids <- colData$ID[match(sample_order, colData$Sample)]
+  count_matrix <- orig %>% dplyr::select(gene = `Gene ID`, all_of(paste0(ordered_ids, ".count")))
+
+  colnames(count_matrix)[2:ncol(count_matrix)] <- sample_order
+  rownames(count_matrix) <- count_matrix$gene
+  count_matrix$gene <- NULL
+  count_matrix <- as.matrix(count_matrix)
+
+  rowData <- orig %>% dplyr::select(`Gene ID`, `Gene Name`, `Gene Type`, Chromosome)
+  rowData <- rowData[match(rownames(count_matrix), rowData$`Gene ID`), ]
+  rownames(rowData) <- rowData$`Gene ID`
+  rowData$`Gene ID` <- NULL
+  count_matrix_round <- round(count_matrix)
+  
+  colData <- colData[match(sample_order, rownames(colData)), ]
+  SummarizedExperiment(assays = list(counts = count_matrix_round), rowData = rowData, colData = colData)
+}
+```
+
+```{r}
+qc <- function(se, smallestGroupSize = 6, minCount = 5) {
+  nrow(se)
+  keep <- rowSums(assay(se) >= minCount) >= smallestGroupSize
+  se <- se[keep, ]
+  nrow(se)
+  se
+}
+```
+
+```{r}
+run_deseq <- function(gse) {
+
+  dds <- DESeqDataSet(gse, design = ~ group)
+  dds <- DESeq(dds)
+
+  res <- results(dds, contrast = c("group", "FAST", "AL"))
+  res <- as.data.frame(res)
+
+  res$gene <- rowData(gse)$`Gene Name`
+  res$chr  <- rowData(gse)$Chromosome
+
+  res
+}
+```
+
+
+```{r}
+run_gsea_go <- function(res) {
+  
+  gene_data <- data.frame(
+    SYMBOL = res$gene,
+    stat   = res$stat
+  )
+  
+  gene_data <- gene_data[!is.na(gene_data$SYMBOL), ]
+  gene_data <- aggregate(stat ~ SYMBOL, data = gene_data, FUN = mean)
+  
+  geneList <- gene_data$stat
+  names(geneList) <- gene_data$SYMBOL
+  geneList <- sort(geneList, decreasing = TRUE)
+  
+  head(geneList)
+  
+  gsea_go_results <- gseGO(
+    geneList      = geneList,
+    OrgDb         = org.Mm.eg.db,
+    keyType       = "SYMBOL",
+    ont           = "ALL",
+    pvalueCutoff  = 0.05,
+    pAdjustMethod = "BH",
+    verbose       = TRUE
+  )
+  
+  cat("GSEA GO analysis complete.\n")
+  
+  return(gsea_go_results)
+}
+```
+
+---
+
+```{r}
+origM <- read_excel("DATA/Male_gene_expression.xlsx") %>% as.data.frame()
+colDataM <- read_excel("DATA/Male_datasheet.xlsx") %>% as.data.frame()
+rownames(colDataM) <- colDataM$Sample
+
+origF <- read_excel("DATA/Female_gene_expression.xlsx") %>% as.data.frame()
+colDataF <- read_excel("DATA/Female_datasheet.xlsx") %>% as.data.frame()
+rownames(colDataF) <- colDataF$Sample
+```
+```{r}
+Male_order <- c("AL_Male_1", "AL_Male_2", "AL_Male_3", "AL_Male_4", "AL_Male_5", "AL_Male_6", "FAST_Male_1","FAST_Male_2", "FAST_Male_3", "FAST_Male_4", "FAST_Male_5", "FAST_Male_6")
+Female_order <- c("AL_Female_1", "AL_Female_2", "AL_Female_3", "AL_Female_4", "AL_Female_5", "AL_Female_6", "FAST_Female_1","FAST_Female_2", "FAST_Female_3", "FAST_Female_4", "FAST_Female_5", "FAST_Female_6")
+```
+
+```{r}
+seM <- make_se(orig = origM, colData = colDataM, sample_order = Male_order)
+seF <- make_se(orig = origF, colData = colDataF, sample_order = Female_order)
+print(seM)
+print(seF)
+```
+
+```{r}
+seM <- qc(seM, smallestGroupSize = 6, minCount = 10)
+seF <- qc(seF, smallestGroupSize = 6, minCount = 10)
+print(seM)
+print(seF)
+```
+```{r}
+# saveRDS(gse, "BulkRNAgse.rds")
+```
+
+```{r}
+rm(colDataM, colDataF, origM, origF)
+```
+---
+
+```{r}
+res_Male   <- run_deseq(seM)
+res_Female <- run_deseq(seF)
+temp <- list(
+  Male   = res_Male,
+  Female = res_Female
+)
+
+# write_xlsx(temp, path = "Bulk_DESeq_MaleandFenale.xlsx")
+```
+
+```{r}
+gsea_go_Male <- run_gsea_go(res_Male)
+gsea_go_Female <- run_gsea_go(res_Female)
+temp <- list(
+  Male_GSEA   = gsea_go_Male@result,
+  Female_GSEA = gsea_go_Female@result
+)
+# write_xlsx(temp, path = "Bulk_GSEA_MaleandFemale.xlsx")
+
+rm(temp)
+```
+
+---
+For WGCNA
+```{r}
+cg <- intersect(rownames(seM), rownames(seF))
+
+se1 <- seM[cg, , drop = FALSE]
+se2 <- seF[cg, , drop = FALSE]
+se2 <- se2[rownames(se1), , drop = FALSE]
+
+mer <- cbind(se1, se2)
+rm(se1, se2, cg)
+mer
+```
+
+```{r}
+# saveRDS(mer, "forWGCNA_bulkRNA.rds")
+```
+---
+
+
+
